@@ -1,0 +1,182 @@
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
+import org.apache.http.HttpEntity;
+import org.apache.http.HttpResponse;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.http.util.EntityUtils;
+
+import java.io.IOException;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
+// Press Shift twice to open the Search Everywhere dialog and type `show whitespaces`,
+// then press Enter. You can now see whitespace characters in your code.
+public class CrptApi {
+
+    private static final String API_URL = "https://ismp.crpt.ru/api/v3/lk/documents/create";
+
+    private final Gson gson = new GsonBuilder().create();
+    private final HttpClient httpClient = HttpClientBuilder.create().build();
+    private final TimeUnit timeUnit;
+    private final int requestLimit;
+    private final AtomicInteger requestCount = new AtomicInteger(0);
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Condition limitCondition = lock.newCondition();
+    private final BlockingQueue<Instant> requestTimes = new LinkedBlockingQueue<>();
+
+    public CrptApi(TimeUnit timeUnit, int requestLimit) {
+        this.timeUnit = timeUnit;
+        this.requestLimit = requestLimit;
+    }
+
+    public void createDocument(Document document, String signature) throws IOException {
+        lock.lock();
+        try {
+            while (requestCount.get() >= requestLimit) {
+                limitCondition.await();
+            }
+            JsonObject requestBody = createRequestBody(document, signature);
+            String json = gson.toJson(requestBody);
+
+            HttpPost request = new HttpPost(API_URL);
+            request.setHeader("Content-Type", "application/json");
+            request.setEntity(new StringEntity(json));
+
+            HttpResponse response = httpClient.execute(request);
+            HttpEntity responseEntity = response.getEntity();
+            String responseBody = EntityUtils.toString(responseEntity);
+            System.out.println(responseBody);
+            requestCount.incrementAndGet();
+            requestTimes.offer(Instant.now());
+            cleanRequestTimes();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            lock.unlock();
+        }
+    }
+    private JsonObject createRequestBody(Document document, String signature) {
+        JsonObject requestBody = new JsonObject();
+
+        requestBody.addProperty("description", gson.toJson(document.description));
+        requestBody.addProperty("doc_id", document.docId);
+        requestBody.addProperty("doc_status", document.docStatus);
+        requestBody.addProperty("doc_type", "LP_INTRODUCE_GOODS");
+        requestBody.addProperty("importRequest", true);
+        requestBody.addProperty("owner_inn", document.ownerInn);
+        requestBody.addProperty("participant_inn", document.participantInn);
+        requestBody.addProperty("producer_inn", document.producerInn);
+        requestBody.addProperty("production_date", document.productionDate);
+        requestBody.addProperty("production_type", document.productionType);
+        requestBody.add("products", gson.toJsonTree(document.products));
+        requestBody.addProperty("reg_date", document.regDate);
+        requestBody.addProperty("reg_number", document.regNumber);
+
+        return requestBody;
+    }
+
+    private void cleanRequestTimes() {
+        while (!requestTimes.isEmpty()) {
+            Instant oldestRequestTime = requestTimes.peek();
+            Duration duration = Duration.between(oldestRequestTime, Instant.now());
+            if (duration.toMillis() > timeUnit.toMillis(1)) {
+                requestTimes.poll();
+                requestCount.decrementAndGet();
+                limitCondition.signalAll();
+            } else {
+                break;
+            }
+        }
+    }
+    public static class Document {
+        public Description description;
+        public String docId;
+        public String docStatus;
+        public String ownerInn;
+        public String participantInn;
+        public String producerInn;
+        public String productionDate;
+        public String productionType;
+        public String regDate;
+        public String regNumber;
+        public Product[] products;
+
+        public static class Description {
+            public String participantInn;
+        }
+
+        public static class Product {
+            public String certificateDocument;
+            public String certificateDocumentDate;
+            public String certificateDocumentNumber;
+            public String ownerInn;
+            public String producerInn;
+            public String productionDate;
+            public String tnvedCode;
+            public String uitCode;
+            public String uituCode;
+
+            public Product(String certificateDocument, String certificateDocumentDate, String certificateDocumentNumber,
+                           String ownerInn, String producerInn, String productionDate, String tnvedCode,
+                           String uitCode, String uituCode) {
+                this.certificateDocument = certificateDocument;
+                this.certificateDocumentDate = certificateDocumentDate;
+                this.certificateDocumentNumber = certificateDocumentNumber;
+                this.ownerInn = ownerInn;
+                this.producerInn = producerInn;
+                this.productionDate = productionDate;
+                this.tnvedCode = tnvedCode;
+                this.uitCode = uitCode;
+                this.uituCode = uituCode;
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        CrptApi crptApi = new CrptApi(TimeUnit.SECONDS, 10); // Лимит 10 запросов в секунду
+
+
+        Document document = new Document();
+        document.description = new Document.Description();
+        document.description.participantInn = "123456789012";
+        document.docId = "12345678901234567890";
+        document.docStatus = "NEW";
+        document.ownerInn = "123456789012";
+        document.participantInn = "123456789012";
+        document.producerInn = "123456789012";
+        document.productionDate = "2023-04-01";
+        document.productionType = "ПРОИЗВОДСТВО";
+        document.regDate = "2023-04-01";
+        document.regNumber = "1234567890";
+        document.products = new Document.Product[] {
+                new Document.Product(
+                        "certificate_document",
+                        "2023-04-01",
+                        "1234567890",
+                        "123456789012",
+                        "123456789012",
+                        "2023-04-01",
+                        "1234567890",
+                        "1234567890",
+                        "1234567890"
+                ),
+        };
+
+        String signature = "signature";
+
+        try {
+            crptApi.createDocument(document, signature);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+}
